@@ -1,0 +1,33 @@
+DRT - DATAFLOW RUN TIME
+-----------------------
+This software aims at demonstrating that we can easily provide a very small and powerful runtime for running programs that are coded in whatever programming model, but that could be *executed* in a DATAFLOW style. The Dataflow Run Time (DRT) provides the runtime support for that 
+
+The first benefit of this software is to allow a rapid development of such programs in the context of the TERAFLUX project http://teraflux.eu
+
+The runtime API has been designed in such way to allow for a future development of a good compiler that targets such interface on one side, and to allow for a good architectural support of such API too: ideally each function could map to a Thread-Level-Parallelism Instruction Set Extension (TLP ISE).
+
+A QUICKSTART GUIDE
+------------------
+- there are some examples to start with: the two classical Recursive-Fibonacci (fib4.c) and Matrix-Multiply (mmul2d.c)
+- to check that everything works, just issue the ./tregression.sh script: it should print OK for each correctly compiled program and for each correctly tested program (the first time you launch it the reference outputs will be generated, the second time the outputs are compared, so you can modify the C examples)
+
+THAT'S IT !
+
+---
+
+HOW TO LEARN MORE
+-----------------
+- For some more information about the T-STAR interface, have a look at this paper:
+http://doi.acm.org/10.1145/2212908.2212959 and or study the example
+- See the TERAFLUX website for more general information
+
+FURTHER OPTIONS
+---------------
+- There are some environment variables that can show you more details about the "Dataflow mode" of executing programs.
+
+  export DRT_DEBUG=1
+  to see more detailed information (values of 2, 3, 4, ... increase the verbosity level).
+
+  export DRT_FSIZE=10000
+  to set the size of internal frame queues (similar to a "stack size")
+

@@ -1,0 +1,153 @@
+#define TSU_PRELOAD_FRAME
+#include <stdio.h>
+#include "tsu.h"
+
+// syntax wrappers
+#define DF_TSCHEDULE(_cond,_ip,_sc) df_tschedule_cond(_ip,_sc,_cond)
+#define DF_TWRITE(_val,_tid,_off) df_write(_tid,_off,_val)
+#define DF_TWRITEN(_val,_tid,_off) df_writeN(_TLOC(_tid,_off),_val)
+#define DF_TREAD(_off) df_frame(_off)
+#define DF_TLOAD(n) df_ldframe(n)
+#define DF_TDESTROY() df_destroy()
+
+// ======================================================================================
+// reference version for comparison
+int n_input;
+int xfib(int n) { return n < 2 ? n : xfib(n-1) + xfib(n-2); }
+// stat reporting help
+uint64_t tt;
+uint64_t ts0[100],ts1[100];
+// ======================================================================================
+
+// df threads
+void fib(void); // 3
+void callfib(void); // 3 
+void ret1(void); // 3 
+void result(void); // 1
+void fib12(void); // 4 
+
+int main(int argc, char **argv)
+{
+  uint64_t r9=4, r10, r11;      
+
+  if (argc > 1) r9 = n_input = atoi(argv[1]);
+  printf("computing fibonacci(%d)\n",(int)r9);
+
+  tt = df_tstamp(ts0); // START TIMING
+
+  r11 = DF_TSCHEDULE (1, result, 1);    // the first 1 means unconditionally scheduling the thread "result". 
+  // the third 1 means the sychcronization count of thread "result".
+  r10 = DF_TSCHEDULE (1, fib, 3);
+
+  DF_TWRITE (r9,  r10,0);     // The fibonacci number is stored in r9
+  DF_TWRITE (r11, r10,1);        // r11 is the frame pointer of "result" thread
+  DF_TWRITE (0,   r10,2);      // 0 is the offset of the frame of "result" thread to read out the final result.
+
+  // DF_TDESTROY();
+  DF_TDESTROY();
+  return 0;
+}
+
+void fib (void)          // fr is the frame pointer of the thread "fib"
+{
+  DF_TLOAD(3);
+  uint64_t r13;
+
+  uint64_t r9 = DF_TREAD(0);
+  uint8_t cnd = r9<=1;
+  r13  =  DF_TSCHEDULE(cnd, ret1, 3);
+  r13 |=  DF_TSCHEDULE(!cnd, callfib, 3);
+  DF_TWRITE (r9, r13,0);
+
+  uint64_t r10 = DF_TREAD(1);
+  DF_TWRITE (r10, r13,1);
+
+  uint64_t r11 = DF_TREAD(2);
+  DF_TWRITE (r11, r13,2);
+
+  DF_TDESTROY();
+}
+
+void 
+callfib (void)
+{
+  DF_TLOAD(3);
+  uint64_t r15, r12, r14;
+
+  r15 = DF_TSCHEDULE (1, fib12, 4); // the synchronization count is 4: 1 is written by "fib(n-1)"
+  //                                 1 is written by "fib(n-2)"
+  //                                 2 are written by "callfib"
+  r14 = DF_TSCHEDULE (1, fib, 3);   // fib(n - 1)
+
+  uint64_t r9 = DF_TREAD(0);
+
+  r12 = r9;
+  r12--;            // n - 1
+
+  DF_TWRITE (r12, r14,0);
+  DF_TWRITE (r15, r14,1);        // fib will pass the "frame pointer" r15|3 to "callfib" or "ret1"
+  DF_TWRITE (2,   r14,2);
+
+  r12--;            // n - 2
+  r14 = DF_TSCHEDULE (1, fib, 3);   // fib(n - 2)
+
+  DF_TWRITE (r12, r14,0);
+  DF_TWRITE (r15, r14,1);        // fib will pass the "frame pointer" r15|4 to "callfib" or "ret1"
+  DF_TWRITE (3,   r14,2);
+
+  uint64_t r10 = DF_TREAD(1);
+  uint64_t r11 = DF_TREAD(2);
+
+  DF_TWRITE (r10, r15,0);
+  DF_TWRITE (r11, r15,1);
+
+  DF_TDESTROY();
+}
+
+void
+ret1 (void)
+{
+  DF_TLOAD(3);
+  uint64_t r9 = DF_TREAD(0);
+  uint64_t r10 = DF_TREAD(1);
+  uint64_t r11 = DF_TREAD(2);
+  DF_TWRITEN (r9, r10, r11);
+//  DF_TWRITE (r9, r10, r11);
+  DF_TDESTROY();
+}
+
+void
+result (void)
+{
+  DF_TLOAD(1);
+  uint64_t r8 = DF_TREAD(0); (void)r8;
+//RG  tt = df_tstamp(ts1) - tt; // END TIMING
+  DF_TDESTROY();
+  df_exit();
+  /* ============================================== */
+
+//RG  uint64_t ttx = df_tstamp(0);
+  int x = xfib(n_input); (void)x;
+//RG  ttx = df_tstamp(0)-ttx;
+  printf("result = %d, expected = %d, %s\n",(int)r8,x,x==r8?"SUCCESS":"FAILURE");
+//RG  df_printstats(ts0,ts1,tt);
+//RG  printf("ref time: %10ld ns (%.3f ms), ratio %.2f\n",ttx,(double)ttx/1e6,(double)ttx/tt);
+}
+
+void
+fib12 (void)
+{
+  DF_TLOAD(4);
+  uint64_t r8, r9, r10, r11;
+  r10 = DF_TREAD(2);
+  r11 = DF_TREAD(3);
+
+  r11 = r11 + r10;      // sum the values of fib(n-1) and fib(n-2)
+
+  r8 = DF_TREAD(0);
+  r9 = DF_TREAD(1);
+  DF_TWRITEN (r11, r8, r9);
+//  DF_TWRITE (r11, r8, r9);
+
+  DF_TDESTROY();
+}

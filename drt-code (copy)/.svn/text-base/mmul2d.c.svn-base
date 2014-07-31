@@ -1,0 +1,650 @@
+#define TSU_PRELOAD_FRAME
+#include <stdio.h>
+#include <stdlib.h>
+//#include <time.h>
+#include "tsu.h"
+
+#define DF_TSCHEDULE(_cond,_ip,_sc) df_tschedule_cond(_ip,_sc,_cond)
+//#define DF_TWRITE(_val,_tid,_off) df_write(_TLOC(_tid,_off),_val)
+#define DF_TWRITE(_val,_tid,_off) df_write(_tid,_off,_val)
+//#define DF_TWRITEN(_val,_tid,_off) df_writeN(_TLOC(_tid,_off),_val)
+#define DF_TREAD(_off) df_frame(_off)
+#define DF_TLOAD(n) df_ldframe(n)
+#define DF_TDESTROY() df_destroy()
+
+#define DF_TALLOC(_type, _sz) df_talloc(_type, _sz)
+#define DF_TFREE(_p) df_tfree(_p)
+#define DF_TWRITE_AL(_p, _val) df_twrite_al(_p, _val)
+#define DF_TREAD_AL(_p) df_tread_al(_p)
+
+// ======================================================================================
+// reference version for comparison
+// *** PLEASE NOTE: the comparison algorithm MUST BE CHANGED for a fair performance comparison
+
+uint64_t *cc; // result matrix... it's initialized in the main function, just before starting timing
+
+
+
+void multiplyMatrix (uint64_t a, uint64_t b, uint64_t size) {
+    uint64_t sum, i, j, k;
+    for (i=0;i<size;++i) {
+       for (j=0;j<size;++j) {
+          sum=0;
+          for (k=0;k<size;++k) {
+             sum = sum + *((uint64_t*)a + (i*size + k)) * (*((uint64_t *)b + (k*size + j)));
+          }
+          *(cc + i*size + j) = sum;
+       }
+    }
+}
+
+
+/*
+void multiplyMatrix (uint64_t a, uint64_t b, uint64_t size) {
+
+    static uint64_t sum=0, i=0, j=0, k=0;
+
+    if (i < size) { //row of first matrix
+        if (j < size) {  //column of second matrix
+            if (k < size) {
+                //sum = sum + (*(a + i*size + k))*(*(b + k*size + j));
+//            	sum = sum + DF_TREAD_AL(a + (i*size + k)*sizeof(uint64_t)) * DF_TREAD_AL(b + (k*size + j) * sizeof(uint64_t));
+            	sum = sum + *(a + (i*size + k)) * *(b + (k*size + j));
+                *(cc + i*size + j) = sum;
+                k++;
+                multiplyMatrix(a,b,size);
+            }
+            else {
+                sum = 0;
+                k = 0;
+                j++;
+                multiplyMatrix(a,b,size);
+            }
+        }
+        else {
+            j = 0; k = 0;
+            i++;
+            multiplyMatrix(a,b,size);
+        }
+    }
+}
+*/
+
+// stat reporting help
+//uint64_t tt;
+//uint64_t ts0[100],ts1[100];
+//namh
+extern uint64_t df_ts0[100],df_ts1[100]; // timestamp buffers
+extern uint64_t df_tt;
+
+// ======================================================================================
+
+// df threads
+void main_ep_1 (void);
+void main_end (void);
+void mul_thread (void);
+void mul_thread_next_el(void);
+void calc_curr_el(void);
+void move_to_next_el(void);
+void mul_thread_end(void);
+void join_threads(void);
+
+void usage() {
+  printf("\nMatrix Multiply\n*****************\n\n     ./mmul s np\nwhere:\n");
+  printf("        s - size of the (squared) matrix\n       np - number of available cores\n"); fflush(stdout);
+}
+
+void printMat (uint64_t pC, uint64_t s) { // = (uint64_t *)r4;
+  uint64_t i = 0, j = 0;
+  printf("\n"); fflush(stdout);
+//  for (i = 0; i < s; i++) {   // i = row pointer
+//    //printf("%lu", *(pC + i*s)); // print the first element of current row
+//	  printf("%lu", DF_TREAD_AL(pC + i*s* sizeof(uint64_t))); // print the first element of current row
+//    for (j = 1; j < s; j++) { // j = column pointer
+//      //printf("\t%lu", *(pC + i*s + j));
+//    	printf("\t%lu", DF_TREAD_AL(pC + (i*s + j) * sizeof(uint64_t)));
+//    }
+//    printf("\n"); fflush(stdout);
+//  }
+    printf("-----\n"); fflush(stdout);
+}
+
+//void df_main(int argc, char **argv)
+//RGvoid main(int argc, char **argv)
+int main(int argc, char **argv)
+{
+  uint64_t r4, r5, i;
+
+  if (argc < 3) { usage(); return 0; }
+
+  r4 = atoi(argv[1]); // matrix size
+  r5 = atoi(argv[2]); // number of processors
+
+  printf("     Matrix size = %lu\n", r4);
+  fflush(stdout);
+  srand(time(NULL));
+
+
+  uint64_t r8 = r4*r4;
+  uint64_t r2 = DF_TALLOC(0, r8*sizeof(uint64_t));  // matrix A
+  printf("     Matrix A address(0x%lx)\n",r2);
+  fflush(stdout);
+  uint64_t r3 = DF_TALLOC(0, r8*sizeof(uint64_t));  // matrix B
+  printf("     Matrix B address(0x%lx)\n",r3);
+  fflush(stdout);
+
+
+  for (i = 0; i < r8; i++) {
+       int val1 = rand()%10;
+       int val2 = rand()%10;
+    DF_TWRITE_AL(r2 + i*sizeof(uint64_t),val1);
+    DF_TWRITE_AL(r3 + i*sizeof(uint64_t), val2);
+  }
+  
+ // printf("A:\n"); printMat(r2,r4); printf("\n");
+ // printf("B:\n"); printMat(r3,r4); printf("\n");
+
+  // build the aa, bb and cc matrixes for the sequential algorithm, for comparison (and correctness check)
+  //aa = r2; // there is no reason for allocating new space for matrix aa and bb
+  //bb = r3; // since matrix a and b are read-only
+  //cc = malloc(r8*sizeof(uint64_t)); // result matrix for the sequential algorithm
+
+  uint64_t r12 = DF_TALLOC(0, r8*sizeof(uint64_t)); // matrix C = AxB
+  printf("     Matrix C(AxB) address(0x%lx)\n",r12);
+  printf("     DataFlow Matrix Multiply STARTING...\n"); fflush(stdout);
+  fflush(stdout);
+  
+  //namh
+  df_tt = df_tstamp(df_ts0);
+  //tt = df_tstamp(ts0); // START TIMING
+
+  for (i = 0; i < r8; i++) 
+  {
+      //printf("Write 0 at 0x%lx+%lu*%lu (0x%lx) (matrix C)\n",r12,i,sizeof(uint64_t),r12+i*sizeof(uint64_t));
+      DF_TWRITE_AL(r12 + i * sizeof(uint64_t), 0);
+  }
+
+
+  uint64_t r14 = 0,
+	   r16 = 0,
+	   r10 = r8/r5,    // size * size / num_processors
+//	   r55 = log2(r4);  // log(size)
+	   r55 = -1,
+           temp = r4;  // log(size)
+           while (temp>0) { ++r55; temp=temp>>1; }
+//RG printf("log2=%d\n",r55);
+//fflush(stdout);
+
+  uint64_t r13 = r5 + 2;
+  //namh: add 2 fields for saving the pointers of A and B, join_threads will read A, B for sequential computation instead of aa, bb
+  //namh: fix with r5 + 2 ~ total cores + 2
+  
+  //uint64_t r58 = DF_TSCHEDULE (1, join_threads, 2 + (r5 + 2));	// the first 1 means unconditionally scheduling the thread "join_threads".
+  uint64_t r58 = df_tscheduleN(join_threads,2+r5+2);
+
+  //uint64_t r58;
+  ///TSU_TSCHEDULEPI((uint64_t)join_threads,1,2+(r5+2),r58);
+  ///TSU_TSCHEDULEPI((uint64_t)join_threads,2+(r5+2),1,r58);
+  //printf("Address of join_threads (8): 0x%lx\n",(uint64_t)join_threads);
+  //TSU_TSCHEDULEPI((uint64_t)join_threads,12,1,r58);
+  //TSU_TSCHEDULEPI((uint64_t)join_threads,2+r5+2,1,r58);
+							// the r13 represents the sychcronization count of thread "join_threads".
+ //namh
+  //DF_TWRITE (r12, r58, 4);	// write in the FM of thread "join_threads" the pointer to the result matrix "C"
+//  DF_TWRITE (r4,  r58, 5);	// write size of the result matrix "C"
+
+  //uint64_t r59 = DF_TSCHEDULE (1, main_ep_1, 10);//11);
+  //namh
+
+ // printf("schedule join_threads address(0x%lx)\n",r58);
+ // fflush(stdout);
+
+  //printf("r12(0x%lx), r4(%lu), r2(0x%lx), r3(0x%lx)\n",r12,r4,r2,r3);
+
+  DF_TWRITE (r12, r58, 1);	// write in the FM of thread "join_threads" the pointer to the result matrix "C"
+  DF_TWRITE (r4,  r58, 2);	// write size of the result matrix "C"
+
+//RG  DF_TWRITE (r2,  r58, 3);	// write size of the result matrix "A"
+//RG  DF_TWRITE (r3,  r58, 4);	// write size of the result matrix "B"
+  DF_TWRITE (r2,  r58, 3);	// write address of the result matrix "A"
+  DF_TWRITE (r3,  r58, 4);	// write address of the result matrix "B"
+
+  //printf("Address of main_ep_1: %p\n",main_ep_1);
+  uint64_t r59 = DF_TSCHEDULE (1, main_ep_1, 11);//11);
+  //printf("schedule main_ep_1 address(0x%lx)\n",r59);
+ 
+  //printf("0xFF,r2(0x%lx),r3(0x%lx),r12(0x%lx),r4(%lu),r5(%lu),r14(%lu),r10(%lu),r55(%lu),r58(0x%lx) AND r16(%lu)\n",
+//           r2,r3,r12,r4,r5,r14,r10,r55,r58,r16); 
+
+  DF_TWRITE (0xFF, r59, 0);  // namh
+  DF_TWRITE (r2,  r59, 1);  // A
+  DF_TWRITE (r3,  r59, 2);  // B
+  DF_TWRITE (r12, r59, 3);  // C
+  DF_TWRITE (r4,  r59, 4);  // size
+  DF_TWRITE (r5,  r59, 5);  // np
+  DF_TWRITE (r14, r59, 6);  // 
+  DF_TWRITE (r10, r59, 7);  // size * size / num_processors <--- represents this part size
+  DF_TWRITE (r55, r59, 8);  // log(size)
+  DF_TWRITE (r58, r59, 9);  // pointer to the FM of thread "join_threads"
+  DF_TWRITE (r16, r59,10);
+  //DF_TWRITE (r60, r59, 12);
+  //
+  DF_TDESTROY(); //RG
+  return 0;
+}
+
+void
+main_ep_1 (void)          // frame is the frame pointer of the thread "fib"
+{
+  //  printf(" inside main_ep_1\n");
+  DF_TLOAD(11);
+
+  uint64_t r2  = df_frame(1),  // A
+	   r3  = df_frame(2),  // B
+	   r12 = df_frame(3),  // C
+	   r4  = df_frame(4),  // size
+	   r5  = df_frame(5),  // np
+	   r14 = df_frame(6),  // 
+	   r10 = df_frame(7),  // size* size / np
+	   r55 = df_frame(8),  // log(size)
+	   r58 = df_frame(9),  // pointer to the FM of thread "join_threads"
+	   r16 = df_frame(10); // current proc
+	   //r60 = df_frame(10);
+
+  //printf("Inside main_ep_1, after df_frame, r2(0x%lx),r3(0x%lx),r12(0x%lx),r4(%lu),r5(%lu),r14(%lu),r10(%lu),r55(%lu),r58(0x%lx) AND r16(%lu)\n",
+  //         r2,r3,r12,r4,r5,r14,r10,r55,r58,r16); 
+
+  //uint64_t r60 = DF_TSCHEDULE (1, mul_thread, 8);
+
+  //namh
+  //printf("Address of mul_thread(9): %p\n",mul_thread);
+  uint64_t r60 = DF_TSCHEDULE (1, mul_thread, 9);
+  DF_TWRITE (0xFF, r60, 0);  // namh
+
+  DF_TWRITE (r2,  r60, 1);  // A
+  DF_TWRITE (r3,  r60, 2);  // B
+  DF_TWRITE (r12, r60, 3);  // C
+  DF_TWRITE (r4,  r60, 4);  // size
+  DF_TWRITE (r14, r60, 5);  // 
+  DF_TWRITE (r10, r60, 6);  // size * size / num_processors <--- represents this part size
+  DF_TWRITE (r55, r60, 7);  // log(size)
+  DF_TWRITE (r58, r60, 8);  // pointer to the FM of thread "join_threads"
+
+  r14 += r10;
+  r16 += 1;
+
+
+  // if (r16 == r5) schedule(main_end); else schedule(main_ep_1);
+  uint8_t cnd = (r16 == r5);
+  // uint64_t r59  =  DF_TSCHEDULE(cnd, main_end, 0);  // remember: the TSCHEDULE returns 0 if the condition is FALSE
+
+  //uint64_t r59 =  DF_TSCHEDULE(!cnd, main_ep_1, 10);//11); // at this point, in r59 there is the pointer to the FM of either main_end or main_ep_1
+
+  //namh
+  if (!cnd) {
+    uint64_t r59;
+    r59 = DF_TSCHEDULE(1, main_ep_1, 11);//11); // at this point, in r59 there is the pointer to the FM of either main_end or main_ep_1
+    DF_TWRITE (0xFF, r59, 0);  // namh
+
+    DF_TWRITE (r2,  r59, 1);  // A
+    DF_TWRITE (r3,  r59, 2);  // B
+    DF_TWRITE (r12, r59, 3);  // C
+    DF_TWRITE (r4,  r59, 4);  // size
+    DF_TWRITE (r5,  r59, 5);  // np
+    DF_TWRITE (r14, r59, 6);  // 
+    DF_TWRITE (r10, r59, 7);  // size * size / num_processors <--- represents this part size
+    DF_TWRITE (r55, r59, 8);  // log(size)
+    DF_TWRITE (r58, r59, 9);  // pointer to the FM of thread "join_threads"
+    DF_TWRITE (r16, r59,10);  // next proc
+    //DF_TWRITE (r60, r59, 12);
+  }
+  DF_TDESTROY();
+}
+
+void
+main_end (void)
+{
+  df_ldframe(0); //RG
+  DF_TDESTROY();
+}
+
+void
+mul_thread (void)
+{
+  //  printf(" inside mul_thread\n");
+  DF_TLOAD(9);
+
+  uint64_t r2  = df_frame(1),  // A
+	   r3  = df_frame(2),  // B
+	   r4  = df_frame(3),  // C
+	   r5  = df_frame(4),  // size
+	   //r5  = df_frame(5),  // np
+	   r6  = df_frame(5),  // 
+	   r7  = df_frame(6),  // size* size / np
+	   r55 = df_frame(7),  // log(size)
+	   r58 = df_frame(8);  // pointer to the FM of thread "join_threads"
+	   //r16 = df_frame(9); // current proc
+	   //r60 = df_frame(10);
+
+  //printf("Inside mul_thread,  r2(0x%lx),r3(0x%lx),r4(0x%lx),r5(%lu),r6(%lu),r7(%lu),r55(%lu),r58(0x%lx) )\n",
+    //       r2,r3,r4,r5,r6,r7,r55,r58);
+
+  r7 += r6; // r7 holds the end index
+  uint64_t r10 = r6; // r10 takes the start index
+
+  //uint64_t r44 = DF_TSCHEDULE (1, mul_thread_next_el, 8);
+
+  //printf("Address of mul_thread_next_el(9): %p\n",mul_thread_next_el);
+
+  //namh
+  uint64_t r44 = DF_TSCHEDULE (1, mul_thread_next_el, 9);
+  DF_TWRITE (0xFF, r44, 0);  // namh
+
+  DF_TWRITE (r2,  r44, 1);  // A
+  DF_TWRITE (r3,  r44, 2);  // B
+  DF_TWRITE (r4,  r44, 3);  // C
+  DF_TWRITE (r10, r44, 4);  // start index
+  DF_TWRITE (r55, r44, 5);  // log(size)
+  DF_TWRITE (r5 , r44, 6);  // size
+  DF_TWRITE (r58, r44, 7);  // pointer to the FM of thread "join_threads"
+  DF_TWRITE (r7,  r44, 8);  // the end index for this part
+
+  DF_TDESTROY();
+}
+
+void
+mul_thread_next_el (void)
+{
+//    printf(" inside mul_thread_next_el\n");
+//    fflush(stdout);
+  DF_TLOAD(9);
+
+  uint64_t r2  = df_frame(1),  // A
+	   r3  = df_frame(2),  // B
+	   r4  = df_frame(3),  // C
+	   r10 = df_frame(4),  // start index
+	   r55 = df_frame(5),  // log(size)
+	   r5  = df_frame(6),  // size
+	   r58 = df_frame(7),  // pointer to the FM of thread "join_threads"
+	   r7  = df_frame(8);  // the end index for this part
+
+ // printf("Inside mul_thread_next_el,  r2(0x%lx),r3(0x%lx),r4(0x%lx),r10(%lu),r55(%lu),r5(%lu),r58(0x%lx),r7(%lu) \n",
+   //        r2,r3,r4,r10,r55,r5,r58,r7);
+
+
+  uint64_t r32 = r10 >> r55;
+//RGprintf("log2=%d r10=%d  r32=%d\n",r55,r10,r32);
+//fflush(stdout);
+
+ 
+  r32 *= r5;
+  uint64_t r30 = r10 - r32,
+	   r26 = 0, // needed for calculating current element (sum)
+	   r34 = 0; // needed for calculating current element (counter)
+
+
+
+  //uint64_t r44 = DF_TSCHEDULE (1, calc_curr_el, 12);
+  
+  //printf("Address of calc_curr_el(13): %p\n",calc_curr_el);
+
+  uint64_t r44 = DF_TSCHEDULE (1, calc_curr_el, 13);
+  DF_TWRITE (0xFF, r44, 0);  // namh
+
+  DF_TWRITE (r2,  r44, 1);  // A
+  DF_TWRITE (r3,  r44, 2);  // B
+  DF_TWRITE (r4,  r44, 3);  // C
+  DF_TWRITE (r32, r44, 4);  // index for A
+  DF_TWRITE (r30, r44, 5);  // index for B
+  DF_TWRITE (r5 , r44, 6);  // size
+  DF_TWRITE (r26, r44, 7);  // 
+  DF_TWRITE (r34, r44, 8);  // 
+  DF_TWRITE (r10, r44, 9);  // start index
+  DF_TWRITE (r58, r44, 10); // pointer to the FM of thread "join_threads"
+  DF_TWRITE (r7 , r44, 11); // the end index for this part
+  DF_TWRITE (r55, r44, 12); // log(size)
+
+  DF_TDESTROY();
+}
+
+void
+calc_curr_el (void)
+{
+  //  printf(" inside calc_curr_el\n");
+ //   fflush(stdout);
+  DF_TLOAD(13);
+
+  uint64_t r2  = df_frame(1),  // A
+	   r3  = df_frame(2),  // B
+	   r4  = df_frame(3),  // C
+	   r32 = df_frame(4),  // index for A
+	   r30 = df_frame(5),  // index for B
+	   r5  = df_frame(6),  // size
+	   r26 = df_frame(7),  // 
+	   r34 = df_frame(8),  // 
+	   r10 = df_frame(9),  // start index
+	   r58 = df_frame(10), // pointer to the FM of thread "join_threads"
+	   r7  = df_frame(11), // the end index for this part
+	   r55 = df_frame(12); // log(size)
+
+  //uint64_t *A = (uint64_t *)r2, // r2 contains the address of the first element of matrix A
+//	   *B = (uint64_t *)r3; // r3 contains the address of the first element of matrix B
+  
+//  printf("Inside calc_curr_el,  r2(0x%lx),r3(0x%lx),r4(0x%lx),r32(%lu),r30(%lu),r5(%lu),r26(%lu),r34(%lu),r10(%lu),r58(0x%lx),r7(%lu),r55(%lu) \n",
+  //         r2,r3,r4,r32,r30,r5,r26,r34,r10,r58,r7,r55);
+
+
+  //uint64_t r28 = A[r32],
+	   //r29 = B[r30];
+
+
+//  printf("%s->0x%lx + %lu * sizeof(uint64_t)\n",__func__,r2,r32);
+//  fflush(stdout);
+  uint64_t r28 = DF_TREAD_AL(r2 + r32 * sizeof(uint64_t));
+  
+  
+  //printf("%s->0x%lx + %lu * sizeof(uint64_t) = 0x%lx\n",__func__,r3,r30,r3+r30*sizeof(uint64_t));
+  //fflush(stdout);
+ 
+
+  uint64_t r29 = DF_TREAD_AL(r3 + r30 * sizeof(uint64_t));
+  //uint64_t r29 = DF_TREAD_AL(r3);
+
+  //uint64_t r29 = 6969696;
+
+  r26 += r28*r29; // current part of the sum
+  r30 += r5;
+  r32++;
+  r34++;
+
+  // if (current element is the last for this sub-block) schedule(move_to_next_el); else schedule(calc_curr_el);
+  uint8_t cnd = (r34 == r5);
+//  uint64_t r44 = DF_TSCHEDULE (cnd, move_to_next_el, 12);
+//  r44 |= DF_TSCHEDULE (!cnd, calc_curr_el, 12);
+
+  //printf("%s,r28(%lu),r29(%lu)\n",__func__,r28,r29);
+  //exit(1); // MY EXIT
+  
+  //namh
+  uint64_t r44;
+  if (cnd)
+    r44 = DF_TSCHEDULE (1, move_to_next_el, 13);
+  else
+    r44 = DF_TSCHEDULE (1, calc_curr_el, 13);
+
+  DF_TWRITE (0xFF, r44, 0);  // namh
+  // to be controlled
+  DF_TWRITE (r2,  r44, 1);  // A
+  DF_TWRITE (r3,  r44, 2);  // B
+  DF_TWRITE (r4,  r44, 3);  // C
+  DF_TWRITE (r32, r44, 4);  // index for A
+  DF_TWRITE (r30, r44, 5);  // index for B
+  DF_TWRITE (r5 , r44, 6);  // size
+  DF_TWRITE (r26, r44, 7);  // current part of the sum
+  DF_TWRITE (r34, r44, 8);  // 
+  DF_TWRITE (r10, r44, 9);  // start index
+  DF_TWRITE (r58, r44, 10); // pointer to the FM of thread "join_threads"
+  DF_TWRITE (r7 , r44, 11); // the end index for this part
+  DF_TWRITE (r55, r44, 12); // log(size)
+
+  DF_TDESTROY();
+}
+
+//static mtne; //RG
+
+void
+move_to_next_el (void)
+{
+  DF_TLOAD(13);
+//  ++mtne; printf("mtne=%d\n", mtne); //RG
+
+  uint64_t r2  = df_frame(1),  // A
+	   r3  = df_frame(2),  // B
+	   r4  = df_frame(3),  // C
+	   r32 = df_frame(4),  // index for A
+	   r30 = df_frame(5),  // index for B
+	   r5  = df_frame(6),  // size
+	   r26 = df_frame(7),  // the sum for this result matrix element
+	   r34 = df_frame(8),  // 
+	   r10 = df_frame(9),  // start index
+	   r58 = df_frame(10), // pointer to the FM of thread "join_threads"
+	   r7  = df_frame(11), // the end index for this part
+	   r55 = df_frame(12); // log(size)
+
+  //uint64_t *pC = (uint64_t *)r4; // r4 holds the address pointer to the matrix C
+  //pC[r10] = r26;
+  DF_TWRITE_AL(r4 + r10 * sizeof(uint64_t), r26);
+  r10++;
+  
+  // if (r10 == r7, means this is the last element) schedule(mul_thread_end) else schedule(mul_thread_next_el);
+  uint8_t cnd = (r10 == r7);
+//  uint64_t r44 = DF_TSCHEDULE (cnd, mul_thread_end, 8);
+//  r44 |= DF_TSCHEDULE (!cnd, mul_thread_next_el, 8);
+
+  //namh
+  uint64_t r44;
+  if (cnd)
+    r44 = DF_TSCHEDULE (1, mul_thread_end, 9);
+  else
+    r44 = DF_TSCHEDULE (1, mul_thread_next_el, 9);
+  DF_TWRITE (0xFF, r44, 0);  // namh
+
+  DF_TWRITE (r2,  r44, 1);  // A
+  DF_TWRITE (r3,  r44, 2);  // B
+  DF_TWRITE (r4,  r44, 3);  // C
+  DF_TWRITE (r10, r44, 4);  // start index
+  DF_TWRITE (r55, r44, 5);  // log(size)
+  DF_TWRITE (r5 , r44, 6);  // size
+  DF_TWRITE (r58, r44, 7);  // pointer to the FM of thread "join_threads"
+  DF_TWRITE (r7,  r44, 8);  // the end index for this part
+
+  DF_TDESTROY();
+}
+
+void
+mul_thread_end (void)
+{
+  DF_TLOAD(8);
+
+  uint64_t r58 = df_frame(7);  // pointer to the FM of thread "join_threads"
+//  DF_TWRITE (1, r58, 1);       // "fake" write, needed to signal the thread "join_threads" at the end of the calculation
+  //namh
+  DF_TWRITE (0xFF, r58, 0);       // "fake" write, needed to signal the thread "join_threads" at the end of the calculation
+  DF_TDESTROY();
+}
+
+void
+join_threads (void)
+{
+  DF_TLOAD(5);
+
+//namh
+//  uint64_t r4 = df_frame(4),   // pointer to the result matrix C
+//           r5 = df_frame(5);   // size of the result matrix C
+
+  uint64_t r4 = df_frame(1),   // pointer to the result matrix C
+           r5 = df_frame(2);   // size of the result matrix C
+
+  uint64_t r2 = df_frame(3),   // pointer to the result matrix A
+		  r3 = df_frame(4);// pointer to the result matrix B
+
+//  tt = df_tstamp(ts1) - tt;    // END TIMING
+  
+  DF_TDESTROY();
+  df_exit();
+
+  //uint64_t *pC = (uint64_t *)r4;
+  uint64_t i, j;
+
+  printf("     DataFlow Matrix Multiply ENDED.\n"); fflush(stdout);
+
+//  for (i = 0; i < r5; i++) {   // i = row pointer
+//    //printf("%lu", *(pC + i*r5)); // print the first element of current row
+//	  printf("%lu", DF_TREAD_AL(r4 + i*r5*sizeof(uint64_t))); // print the first element of current row
+//    for (j = 1; j < r5; j++) { // j = column pointer
+//      //printf("\t%lu", *(pC + i*r5 + j));
+//    	printf("\t%lu", DF_TREAD_AL(r4 + (i*r5 + j)*sizeof(uint64_t)));
+//    }
+//    printf("\n"); fflush(stdout);
+//  }
+  uint64_t dfchecksum = 0L;
+  for (i = 0; i < r5; i++) {   // i = row pointer
+    for (j = 0; j < r5; j++) { // j = column pointer
+	  dfchecksum += dfchecksum + *((uint64_t *)r4 + (i*r5 + j));
+    }
+  }
+  printf("     DataFlow CHECKSUM=0x%lx\n",dfchecksum); fflush(stdout);
+
+  //printf("AA:\n"); printMat(aa,r5); printf("\n");
+  //printf("BB:\n"); printMat(bb,r5); printf("\n");
+
+  printf("     Standard Matrix Multiply STARTING...\n"); fflush(stdout);
+  cc = malloc(r5*r5*sizeof(uint64_t)); // result matrix for the sequential algorithm
+//namh
+//  uint64_t ttx = df_tstamp(0); // START TIMING
+  multiplyMatrix (r2, r3, r5);
+//  ttx = df_tstamp(0) - ttx;    // END TIMING
+  printf("     Standard Matrix Multiply ENDED.\n"); fflush(stdout);
+  uint64_t stchecksum = 0L;
+  for (i = 0; i < r5; i++) {   // i = row pointer
+    for (j = 0; j < r5; j++) { // j = column pointer
+	  stchecksum += stchecksum + *(cc + (i*r5 + j));
+    }
+  }
+  printf("     Standard CHECKSUM=0x%lx\n",stchecksum); fflush(stdout);
+  printf("---- CHECKSUM %s.\n",(dfchecksum==stchecksum)?"OK":"ERROR"); fflush(stdout);
+
+  // compare the two matrix, for correctness
+  printf("     Comparing DataFlow/Standard calculated C matrices...\n"); fflush(stdout);
+  for (i = 0; i < r5; i++) {
+    for (j = 0; j < r5; j++) {
+      //printf("%lu = %lu (%lu,%lu)\n", *(pC + i*r5 + j),*(cc + i*r5 +j),i,j);
+      //if (*(pC + i*r5 + j) != *(cc + i*r5 +j)) break;
+    	if (*((uint64_t *)r4 + (i*r5 + j)) != *(cc + i*r5 +j)) break;
+    }
+    if (j != r5) break;
+  }
+
+  printf("\n*** %s ***\n",((i==r5 && j==r5)?"SUCCESS":"FAILURE"));
+//namh
+//  df_printstats(ts0,ts1,tt);
+//  printf("ref time: %10ld ns (%.3f ms), ratio %.2f\n",ttx,(double)ttx/1e6,(double)ttx/tt);
+//  fflush(stdout);
+
+  /*/ we now print the result matrix C
+  //uint64_t *pC = (uint64_t *)r4;
+  //uint64_t i, j;
+  printf("\n"); fflush(stdout);
+  for (i = 0; i < r5; i++) {   // i = row pointer
+    printf("%lu", *(pC + i*r5)); // print the first element of current row
+    for (j = 1; j < r5; j++) { // j = column pointer
+      printf("\t%lu", *(pC + i*r5 + j));
+    }
+    printf("\n"); fflush(stdout);
+  } // */
+
+  free(cc);
+  DF_TFREE(r2); //free A
+  DF_TFREE(r3); //free B
+  DF_TFREE(r4); // free C
+}

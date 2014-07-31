@@ -1,0 +1,53 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<unistd.h>  
+
+char threadAction[200],ip[20], fp[20],fId[20], sc[200];
+const char  *ipTable[100];
+int main(int argc, char **argv){
+	system("/home/mazumdar/DRTSIM/drt-code/tregression.sh");  //Calling DRT script from here
+	//setting the environmental variable
+	setenv("DRT_DEBUG","4",0);	
+	system("./fib-tsu4 > output.txt");  //calling DRT and saving output to a file
+	fileRead();
+         return 0;
+}
+
+
+// The following code is to read the file and parse it
+fileRead(void)
+{  
+int i=0,j;
+static const char filename[] = "output.txt";
+FILE *file = fopen (filename, "r");
+if (file != NULL)
+{
+char line [256];
+while (fgets (line, sizeof line, file) != NULL) /* read a line */
+{
+fputs ( line, stdout ); /* write the line */
+sscanf(line, "%s %s %s %s %s", threadAction,fId,ip,fp,sc);
+ipTable[i]=ip;
+//printf("ipTable[i] %s  = ip %s \n", ipTable[i],ip);
+//printf("%s     %s     %s    %s   %s\n", threadAction,fId,ip,fp,sc); 
+i++;
+printf("[i]= %d", i);
+for(j=0;j<i;j++){
+
+
+printf("Value is = %s ", ipTable[j]);
+}
+}
+
+
+
+fclose (file);
+}
+else
+{
+perror (filename);
+}
+return 0;
+}
+

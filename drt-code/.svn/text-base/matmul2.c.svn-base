@@ -1,0 +1,205 @@
+#include "tsu.h"
+#include <stdio.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <math.h>
+
+// #define __DEBUG
+
+int NNODES=1;
+
+#ifdef __DEBUG
+#define N 128
+#define BLOCKSZ 8
+#else
+#define N 128
+#define BLOCKSZ 8
+#endif
+
+#define DATA double
+#define SIZE(M,N) (N*M*sizeof(DATA))
+
+#define RB_SZ SIZE(N,N)
+#define RA_SZ SIZE(N,BLOCKSZ)
+#define RC_SZ SIZE(N,BLOCKSZ)
+
+#define RC_OFF(j) (            SIZE(N,j))
+#define RB_OFF(j) (  SIZE(N,N)+SIZE(N,j))
+#define RA_OFF(j) (2*SIZE(N,N)+SIZE(N,j))
+
+typedef struct {
+    DATA *r_A;
+    DATA *r_B;
+    DATA *r_C;
+    df_tid_t xpp;       // partial print instance tid
+    df_tid_t xfinish;   // finish barrier tid
+} frame_t;
+
+#ifdef __DEBUG
+
+#define print_matrix(out,X,Y)                   \
+do{                                             \
+  int i,j;                                      \
+  for (i = 0; i < X; i++){                      \
+    for (j = 0; j < Y; j++){                    \
+      printf ("%4.0f,",out[i*N+j]);             \
+    }                                           \
+    printf ("\n");                              \
+  }                                             \
+  printf ("\n");                                \
+ }while(0);
+#else
+#define print_matrix(out,X,Y) /**/
+#endif
+
+void block_matrix_mul()
+{
+    const frame_t *cfp = (const frame_t *)df_tload();
+    const DATA *A = cfp->r_A;
+    const DATA *B = cfp->r_B;
+    DATA *C = cfp->r_C;
+    int i, j, k;
+
+    print_matrix(A, BLOCKSZ, N);
+    print_matrix(B, N, N);
+
+    for (j = 0; j < BLOCKSZ; j++) {
+        for (i = 0; i < N; i++) {
+            DATA t = 0;
+            for (k = 0; k < N; k++) {
+                t += A[j * N + k] * B[k * N + i];
+            }
+            C[i + j * N] = t;
+        }
+    }
+
+    print_matrix(C, BLOCKSZ, N);
+
+    df_publish(C);
+    df_tdecrease(cfp->xpp); // start the print thread
+    df_tdecrease(cfp->xfinish); // decr the barrier count
+    df_destroy();
+}
+
+void print_partial_result()
+{
+    const void *cfp = df_tload();
+    const DATA *C = ((DATA * const *)cfp)[0];
+    int nb = ((uint64_t*)cfp)[1];
+    int i, j;
+    DATA sum = 0.0;
+    for (i = 0; i < N; i++)
+        for (j = 0; j < BLOCKSZ; j++)
+            sum += C[i * BLOCKSZ + j];
+    printf("block %d sum = %.0f\n", nb, sum);
+    df_destroy();
+}
+
+void finish()
+{
+    const void *cfp = df_tload();
+    const DATA *A = ((DATA * const *)cfp)[0];
+    const DATA *B = ((DATA * const *)cfp)[1];
+    const DATA *C = ((DATA * const *)cfp)[2];
+
+    // Reference version, for comparison
+    int i, j, k;
+    int ok = 1;
+    for (i = 0; i < N; ++i) {
+        for (j = 0; j < N; ++j) {
+            DATA t = 0;
+            for (k = 0; k < N; ++k)
+                t += A[i * N + k] * B[k * N + j];
+            if (C[i * N + j] != t)
+                ok = 0;
+        }
+    }
+    printf(ok ? "*** SUCCESS ***\n" : "*** FAIL ***\n");
+    if (!ok) {
+        print_matrix(A, N, N);
+        print_matrix(B, N, N);
+        print_matrix(C, N, N);
+    }
+    df_destroy(); //RG
+    df_exit();
+}
+
+/* OWM version. Compute C=A*B.  */
+void owm_matrix_mul()
+{
+    // Schedule final check
+    df_tid_t xf = df_tschedulez(&finish, N / BLOCKSZ, 24);
+    df_constrain(xf,1); // force on node 1
+    df_subscribe(_TLOC(xf, 0 * 8), RA_OFF(0), SIZE(N, N), _OWM_MODE_R);
+    df_subscribe(_TLOC(xf, 1 * 8), RB_OFF(0), SIZE(N, N), _OWM_MODE_R);
+    df_subscribe(_TLOC(xf, 2 * 8), RC_OFF(0), SIZE(N, N), _OWM_MODE_R);
+
+    int j,nb;          /* For j iteration, block size = blocksz.  */
+    for (j=nb=0; j<N; j+=BLOCKSZ,++nb) {
+        uint64_t fnode = 1<<(nb % NNODES); // spread threads to all nodes
+
+        df_tid_t bm = df_tschedulez(&block_matrix_mul, 1, sizeof(frame_t));
+        df_constrain(bm,fnode); 
+        /* Region B (size N*N)       stores the entire matrix B */
+        /* Region A (size N*BLOCKSZ) stores the block of matrix A  */
+        /* Region C (size N*BLOCKSZ) stores the computed result.  */
+        df_subscribe(_TLOC(bm, offsetof(frame_t, r_A)), RA_OFF(j), RA_SZ, _OWM_MODE_R);
+        df_subscribe(_TLOC(bm, offsetof(frame_t, r_B)), RB_OFF(0), RB_SZ, _OWM_MODE_R);
+        df_subscribe(_TLOC(bm, offsetof(frame_t, r_C)), RC_OFF(j), RC_SZ, _OWM_MODE_W);
+
+        // subscribe print_partial_result to region C
+        df_tid_t pp = df_tschedule64(&print_partial_result, 2);
+        df_constrain(pp,fnode);
+        uint64_t* pp_fp = df_tcache(pp);
+        df_subscribe(_TLOC(pp, 0), RC_OFF(j), RC_SZ, _OWM_MODE_R);
+        pp_fp[1] = nb;
+        df_tdecrease(pp);
+
+        // register print_partial_result instance and finish barrier
+        frame_t* bm_fp = df_tcache(bm);
+        bm_fp->xpp = pp;
+        bm_fp->xfinish = xf;
+        df_tdecrease(bm);
+    }
+    df_destroy();
+}
+
+void fill_matrix()
+{
+    DATA *const *cfp = (DATA * const *)df_tload();
+    DATA *A = cfp[0];
+    DATA *B = cfp[1];
+    DATA *C = cfp[2];
+    int i, j;
+    for (i = 0; i < N; i++) {
+        for (j = 0; j < N; j++) {
+
+            A[i * N + j] = round(10 * drand48()) -3;  // some random small value
+            B[i * N + j] = round(10 * drand48()) -3;
+            C[i * N + j] = 0;   // initialize to 0
+        }
+    }
+
+    // publish changes
+    df_publish(A);
+    df_publish(B);
+    df_publish(C);
+
+    // start the multiply
+    df_tid_t xm = df_tschedule64(&owm_matrix_mul, 1);
+    df_tdecrease(xm);
+    df_destroy();
+}
+
+int main(int argc, char **argv)
+{
+    char* nn = getenv("DF_NNODES"); if (nn) NNODES=atoi(nn);
+
+    df_tid_t xm = df_tschedule64(&fill_matrix, 3);
+    df_subscribe(_TLOC(xm, 0 * 8), RA_OFF(0), SIZE(N, N), _OWM_MODE_W);
+    df_subscribe(_TLOC(xm, 1 * 8), RB_OFF(0), SIZE(N, N), _OWM_MODE_W);
+    df_subscribe(_TLOC(xm, 2 * 8), RC_OFF(0), SIZE(N, N), _OWM_MODE_W);
+    df_tdecreaseN(xm, 3);
+    return 0;
+}
+

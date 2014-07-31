@@ -1,0 +1,69 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<unistd.h>  
+
+char threadAction[200],ip[20], fp[20],fId[20], sc[200];
+char  *ipTable[100], *fpTable[100];
+int k,j,i=0;
+
+int main(int argc, char **argv){
+	system("/home/mazumdar/DRTSIM/drt-code/tregression.sh");  //Calling DRT script from here
+	//setting the environmental variable
+	setenv("DRT_DEBUG","4",0);	
+	system("./fib-tsu4 > output.txt");  //calling DRT and saving output to a file
+	fileRead();
+         return 0;
+}
+
+
+// The following code is to read the file and parse it
+fileRead(void)
+{  
+
+static const char filename[] = "output.txt";
+FILE *file = fopen (filename, "r");
+if (file != NULL)
+{
+int m,n=0,p,o;
+char line [256];
+while (fgets (line, sizeof line, file) != NULL) /* read a line */
+{
+//fputs ( line, stdout ); /* write the line */
+sscanf(line, "%s %s %s %s %s", threadAction,fId,ip,fp,sc);
+ipTable[i]=ip;
+//printf("%s     %s     %s    %s   %s\n", threadAction,fId,ip,fp,sc); 
+i++;
+}
+
+printf("size of i is %d \n", i);
+o=26;
+for(m=0;m<26;m++)
+{ 
+printf(" IpTable Unique m = %d \n",m);
+ for(n=m+1;n<26;n++)
+   {
+printf(" IpTable Unique  n =%d \n",n);
+      if(strcmp (ipTable[m],ipTable[n])== 0)
+      {
+         for(k=n;k<26;k++){
+             ipTable[k]=ipTable[k+1];
+          o--;
+}
+      }
+   }
+}
+
+for (j=0;j< 26;j++){
+printf("Value is = %s ", ipTable[j]);
+}
+fclose (file);
+}
+
+else
+{
+perror (filename);
+}
+return 0;
+}
+

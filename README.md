@@ -1,4 +1,4 @@
 DrtSim
 ======
 
-DRT Runtime Simulator
+DRT Runtime Simulator is a runtime simulator for many core architecture domain.
